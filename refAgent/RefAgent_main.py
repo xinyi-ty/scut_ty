@@ -1,10 +1,9 @@
 from refAgent.java_metrics_calculator import JavaMetricsCalculator
 from refAgent.dependency_graph import JavaClassDependencyAnalyzer, draw_dependency_graph
 from utilities import *
-from refAgent.OpenaiLLM import OpenAILLM
-import sys
 from settings import Settings
 import argparse
+from refAgent.agents import PlannerAgent, RefactoringGeneratorAgent, CompilerAgent, TestAgent
 
 # === Parse project name argument ===
 parser = argparse.ArgumentParser(description="Refactor Java Project")
@@ -14,6 +13,7 @@ args = parser.parse_args()
 protject_name = args.project_name
 
 config = Settings()
+
 # Example usage
 if __name__ == "__main__":
 
@@ -63,58 +63,40 @@ if __name__ == "__main__":
             #Export the CKO metrics of the original class to results folder
             results["CKO metrics"] = before_metrics
 
-            # Example usage:
+            # Example usage with agents:
             api_key = config.API_KEY
-            llm = OpenAILLM(api_key)
-            prompt = "You are a software developer, helpull and a java expert"
+            planner = PlannerAgent(api_key, model=config.MODEL_NAME)
+            refactoring_generator = RefactoringGeneratorAgent(api_key, model=config.MODEL_NAME)
+            compiler = CompilerAgent(api_key, model=config.MODEL_NAME)
+            test_agent = TestAgent(api_key, model=config.MODEL_NAME)
 
-            query = """
-                For each method in the provided Java class : 
-                {} 
-                
-                Return "Yes or No based on wether the method needs refactoring and improvement to enhance is readaoilty and maintainability clarity. and adherence to basic coding practices. . 
-                Ensure that your assessment considers the method's complexity, the class weighted Methods per class, the lack of cohesion of methods in the class.
-                
-                Class CKO metrics : 
-                {}
-
-                Provide your response in a json format as follow : 
-                {{
-                Method1: (yes, improvement instruction),
-                Method2: No,
-                Method3: (yes, improvement instruction)
-                }}
-
-                Avoid using natural lanquage explanation
-                """.format(before_calculator.java_code, before_calculator.as_string())
-                
-            Instruction = llm.query_llm(prompt, query, model=config.MODEL_NAME)
+            # Build instruction query via PlannerAgent
+            Instruction = planner.analyze_methods(before_calculator.java_code, before_calculator.as_string())
             results["Instruction"] = Instruction
 
-            #Decision Node
-            query_decisition = """
-                    Output: True or false
+            # Decision Node: ask planner (or the base send) to decide if any method needs improvement
+            query_decisition = f"""
+                            Output: True or false
 
-                    From this set of instructoin to improve all these methods does as least one method need improvement:
+                            From this set of instructoin to improve all these methods does as least one method need improvement:
 
-                    Instruction: {}
+                            Instruction: {Instruction}
 
-                    Don't return any natural language explanation
-                    """.format(Instruction)
-            do_instrect = llm.query_llm(prompt, query_decisition, model=config.MODEL_NAME)
-            
-            if do_instrect:   
+                            Don't return any natural language explanation
+                            """
+            do_instrect = planner.send(None, query_decisition)
 
-                for i in range(5): 
-                    query = """
-                            Following the instruction Instructions:{}  and CKO metrics {} and dependent calsses, improve the provided java code {} and improve the
-                            CKO metrics. You can assume that the given class and methods are functionally correct. Ensure that you do not
-                            Alter the behaviour of the external method while maintaining the behaviour of the method, maintaining both syntactic
-                            and semantic corectness. Don't remove any comments or annotations.
-                            Provide the java class within code block. Avoid using natural langiage explanations
-                            """.format(Instruction, before_metrics,Before_java_code)
-                    improvement = llm.query_llm(prompt, query, model=config.MODEL_NAME)
-                    improvement = improvement.replace("```java", "").replace("```", "")
+            if do_instrect:
+                for i in range(20):
+                    query = f"""
+                                Following the instruction Instructions:{Instruction}  and CKO metrics {before_metrics} and dependent calsses, improve the provided java code {Before_java_code} and improve the
+                                CKO metrics. You can assume that the given class and methods are functionally correct. Ensure that you do not
+                                Alter the behaviour of the external method while maintaining the behaviour of the method, maintaining both syntactic
+                                and semantic corectness. Don't remove any comments or annotations.
+                                Provide the java class within code block. Avoid using natural langiage explanations
+                                """
+                    # RefactoringGeneratorAgent.run will use REFRACTORING_GENERATOR_MAX_TOKENS as the system prompt and strip fences
+                    improvement = refactoring_generator.run(query, use_refactoring_generator_prompt=True)
 
                     print(f"------------ Start making the improvement to compile and test Itteration {i}-----------------")
                     print(f"=============================================================================================")
@@ -129,26 +111,61 @@ if __name__ == "__main__":
                     print("-------------------- Compile the improved code ---------------------------------------")
 
                     project_directory = f"projects_after/{protject_name}"
-                    is_compiled = compile_project_with_maven(project_directory)
-                    if is_compiled == False:
+                    # Use CompilerAgent to compile and (on failure) generate an LLM summary of the error.
+                    is_compiled, compile_summary = compiler.compile_and_summarize(project_directory, Before_java_code, improvement)
+                    if not is_compiled:
                         results["Compilation"] = False
                         results["Test passed"] = False
-                        results["is improved"] = False 
+                        results["is improved"] = False
+                        # Restore original code on failed compilation
                         write_to_java_file(file_path=path_to_java_file_after, java_code=Before_java_code)
+                        # Add the compiler LLM summary to the refactoring_generator's message history for context (in-memory only).
+                        try:
+                            refactoring_generator.llm.message_history.append({"role": "user", "content": compile_summary})
+                        except Exception:
+                            pass
+                        # Print the summary for the user, but do not persist it to disk.
+                        print("Compilation summary (LLM):")
+                        print(compile_summary)
                         continue
 
                     print("------------ Test the improved code ---------------------------------------")
                     graph_dep = read_json_file(graph_path)
                     files = extract_ids(graph_dep)
                     tests = find_test_files(files)
+
+                    # Collect per-test summaries and produce one combined summary at the end
+                    test_summaries = []
                     for test in tests:
-                        if test!="TestCase":
-                            rcode = run_maven_test(test, project_dir=project_directory, verify=False)
+                        if test != "TestCase":
+                            rcode, test_summary = test_agent.run_test_and_summarize(
+                                test,
+                                project_dir=project_directory,
+                                verify=False,
+                                original_code=Before_java_code,
+                                refactored_code=improvement,
+                            )
                             if rcode.returncode != 0:
-                                results["Compilation"] = True
-                                results["Test passed"] = False
-                                results["is improved"] = False
-                                continue  
+                                # collect the LLM summary when available, otherwise raw stderr
+                                test_summaries.append(test_summary or rcode.stderr)
+                                # continue checking other tests to aggregate all failures
+                                continue
+
+                    # If any tests failed, synthesize one summary for all failures and skip commit/metrics
+                    if test_summaries:
+                        combined_summary = test_agent.combine_summaries(test_summaries, original_code=Before_java_code, refactored_code=improvement)
+                        results["Compilation"] = True
+                        results["Test passed"] = False
+                        results["is improved"] = False
+                        # keep combined summary in-memory for context
+                        try:
+                            refactoring_generator.llm.message_history.append({"role": "user", "content": combined_summary})
+                        except Exception:
+                            pass
+                        # Print the combined summary for visibility
+                        print("Combined test failure summary (LLM):")
+                        print(combined_summary)
+                        continue
                     print("------------- Commit the code changes to github-------------------")
 
                     repo_path = f'projects/after/{protject_name}'
@@ -158,7 +175,6 @@ if __name__ == "__main__":
                     commit_file_to_github(repo_path, file_path, commit_message)   
 
                     #Compute CKO metrics
-                    # 1. For a single file
                     # 1. For a single file
                     input_path = "code_smells/project/after"  # Path to the Java code directory
                     output_path = "./code_smells/tmp/after"   # Path to store metrics
@@ -186,8 +202,13 @@ if __name__ == "__main__":
                             Avoid using natural lanquage explanation
                             """.format(Before_java_code, after_metrics,improvement, after_metrics)
                     
-                    is_improvement = llm.query_llm(prompt, query, model=config.MODEL_NAME)
-                    if is_improvement ==False:
+                    is_improvement_resp = planner.send(None, query)
+                    try:
+                        is_improvement = str(is_improvement_resp).strip().lower() in ("true", "yes", "1")
+                    except Exception:
+                        is_improvement = False
+
+                    if not is_improvement:
                         results["Compilation"] = True
                         results["Test passed"] = True
                         results["is improved"] = False
