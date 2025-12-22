@@ -56,10 +56,10 @@ def compile_project_with_maven(project_dir='.'):
     
     if process.returncode == 0:
         print("Compilation successful!")
-        return True
+        return True, " "
     else:
         print("Compilation failed with return code:", process.returncode)
-        return False
+        return False, process.stderr
 
 def create_directory_if_not_exists(directory_path):
     try:
@@ -141,7 +141,7 @@ def extract_class_name(java_file_path):
     except FileNotFoundError:
         print(f"File not found: {java_file_path}")
     except javalang.parser.JavaSyntaxError as e:
-        print(f"Java syntax error in file: {e}")
+        print(f"Java syntax error in file: {java_file_path}")
     except Exception as e:
         print(f"An error occurred: {e}")
 

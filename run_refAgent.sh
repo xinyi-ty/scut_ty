@@ -19,7 +19,7 @@ REPO=$(echo "$ORG_REPO" | cut -d'/' -f2)
 REPO_URL="https://github.com/$ORG_REPO.git"
 BEFORE_PATH="projects/before/$REPO"
 AFTER_PATH="projects/after/$REPO"
-
+ROOT_DIR="$(pwd)"
 # === STEP 1: Clone specific tag only ===
 if [ -d "$BEFORE_PATH" ]; then
     echo "📁 Project already exists at $BEFORE_PATH. Skipping clone."
@@ -49,6 +49,24 @@ fi
 echo "✅ Maven build succeeded!"
 
 # === STEP 4: Run Python script with project name ===
-cd ../../  # Assuming the shell script is at root level and refAgent is at ./refAgent/
-echo "🚀 Running Python script for project: $REPO..."
-python3 refAgent/RefAgent_main.py "$REPO"
+repo_root="$ROOT_DIR"
+
+cd "$repo_root" || exit 2
+echo "🚀 Running Python script for project: $REPO... (repo root: $repo_root)"
+
+# Support both possible locations for the Python entrypoint. Prefer a top-level
+# RefAgent_main.py if present (historical), otherwise use refAgent/RefAgent_main.py.
+if [ -f "$repo_root/refAgent/RefAgent_main.py" ]; then
+    # Run the package as a module so imports like `import refAgent.*` resolve
+    echo "Using module: refAgent.RefAgent_main"
+    python3 -m refAgent.RefAgent_main "$REPO"
+elif [ -f "$repo_root/RefAgent_main.py" ]; then
+    # Fall back to running the top-level script directly (legacy layout)
+    echo "Using script: $repo_root/RefAgent_main.py"
+    python3 "$repo_root/RefAgent_main.py" "$REPO"
+else
+    echo "❌ Could not find RefAgent_main.py in expected locations:"
+    echo "   $repo_root/RefAgent_main.py"
+    echo "   $repo_root/refAgent/RefAgent_main.py"
+    exit 1
+fi

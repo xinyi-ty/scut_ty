@@ -5,9 +5,7 @@ This repository provides a **multi-agent LLM-based framework** for **automatic s
 
 ## Features
 - Multi-agent architecture for software refactoring
-- Utilization of **LLMs** (e.g., OpenAI, StarCoder, DeepSeek, etc.)
-- GPU support for faster processing
-- Integration with **Refactoring Miner** for detecting and validating refactorings
+- Utilization of **LLMs** (e.g., OpenAI, StarCoder, DeepSeekCoder, etc.)
 - Compatibility with GitHub repositories for code retrieval, version control, and committing improvements
 
 ## Requirements
@@ -18,7 +16,7 @@ Before running the framework, you need to set up the environment.
     ```env
     API_KEY=""
     GITHUB_API_KEY=""
-    MODEL_NAME="gpt-40"
+    MODEL_NAME="gpt-4o"
     ```
     Fill in the required API keys before running the framework.
 
@@ -30,75 +28,117 @@ Before running the framework, you need to set up the environment.
    - Ideally runs on a **GPU** for efficiency
    - If using **open-source LLMs** (e.g., StarCoder, DeepSeek), ensure you are running with GPU support
 
-3. **Refactoring Miner**:
-   - Download **Refactoring Miner** from [this GitHub repo](https://github.com/tsantalis/RefactoringMiner)
-   - Place it inside a folder named `REFACTORINGMINER` at the project root
+# RefAgent — Multi-agent LLM-based Refactoring Framework
 
-4. **Java & Maven**:
-   - Make sure **Maven** is installed and accessible via the terminal
-   - Required Maven version: **3.0.5**
-   - Make sure your **Java version is compatible** with the Maven project being cloned and built
-   > ⚠️ **If the Maven build fails**, please ensure you are using a Java version supported by the project (e.g., Java 8, 11, etc.)
+RefAgent is a multi-agent system that uses Large Language Models (LLMs) to analyze, suggest, and apply refactorings to Java projects. The pipeline can clone a repository tag, apply model-guided refactorings, compile and test, and optionally commit improvements back to the repository.
 
-## Installation
-```bash
-# Clone the repository
-git clone https://github.com/your-repo/multi-agent-refactoring.git
-cd multi-agent-refactoring
+This README gives a compact, practical guide to set up and run the project.
 
-# Create and activate a virtual environment
-python -m venv venv
-source venv/bin/activate  # On Windows use: venv\Scripts\activate
+---
 
-# Install dependencies
-pip install -r requirements.txt
-````
+## Quick start
 
-## Running Experiments
-
-### 1. Full Pipeline (Clone → Build → Refactor)
-
-To run the complete pipeline using a GitHub repo and a specific tag:
+- Run the full pipeline (clone → build → refactor):
 
 ```bash
 ./run_refAgent.sh <org/repo-name> <tag>
+# e.g. ./run_refAgent.sh apache/maven v3.8.6
 ```
 
-**Example:**
+- Or run the Python pipeline directly when the project is already present in `projects/after/`:
 
 ```bash
-./run_refAgent.sh apache/maven v3.8.6
+python3 refAgent/RefAgent_main.py <project-name>
+# e.g. python3 refAgent/RefAgent_main.py jclouds
 ```
 
-This script will:
+---
 
-* Clone the specified repository tag into `projects/before/`
-* Copy it into `projects/after/`
-* Build it using Maven
-* Launch the refactoring pipeline via `refAgent/RefAgent_main.py`
+## Prerequisites
 
-### 2. Running the Python Refactoring Script Directly
+- Python 3.9+
+- Java (JDK) compatible with the target project
+- Maven installed and on PATH (or the project's `mvnw` wrapper)
+- Git
+- LLM API credentials (OpenAI or another adapter supported by `refAgent/OpenaiLLM.py`)
 
-If you already have a cloned and built project (e.g., from `run_refAgent.sh`), you can run the main refactoring pipeline directly:
+Recommended Java versions
+- For best compatibility with the built-in Python parser (`javalang`) and the tooling in this repo,
+  we recommend using Java 8, 9, or 12 for projects you plan to analyze and refactor. If your project
+  uses newer Java language features (post-Java 12), consider using a Java-based parser (e.g. JavaParser)
+  or building with the project's `mvnw` wrapper and double-checking parsing results.
+
+Important note about CompilerAgent & TestAgent
+- The `CompilerAgent` and `TestAgent` are agents whose sole purpose is to compile and run
+   Maven-based Java projects. They do not modify environment settings or install toolchains.
+- It is critical that the Java (JDK) version and the Maven version (or the project's `mvnw` wrapper)
+   exactly match what the target project expects. Mismatched Java/Maven versions are the most
+   common cause of build and test failures and can produce misleading LLM diagnostics.
+- The provided `run_refAgent.sh` performs a basic verification, but you should always confirm the
+   JDK and Maven versions locally before running RefAgent. If the project provides `mvnw`,
+   prefer using it (see Troubleshooting below).
+
+Optional: GPU when running large local models.
+
+## Configuration (.env)
+
+Create a `.env` file in the repository root (read by `settings.py`):
+
+```env
+API_KEY="<your-llm-api-key>"
+GITHUB_API_KEY="<your-github-token>"  # optional, used for commits
+MODEL_NAME="gpt-4"
+```
+
+The `Settings` class (in `settings.py`) reads `.env` automatically.
+
+## Install dependencies
+
+Install Python dependencies into a virtualenv and activate it:
 
 ```bash
-python refAgent/RefAgent_main.py <project-name>
+python -m venv venv
+source venv/bin/activate
+pip install -r requirment.txt
 ```
 
-**Example:**
+Note: the repository currently includes `requirment.txt` (typo preserved). Rename to `requirements.txt` if you prefer standard naming and update commands accordingly.
 
-```bash
-python refAgent/RefAgent_main.py jclouds
-```
+## How it works (high level)
 
-## Repository List
+- The main pipeline (`refAgent/RefAgent_main.py`) iterates over Java files in `projects/before/<project>`.
+- Agents:
+   - `PlannerAgent`: decides which methods need refactoring based on CKOO metrics.
+   - `RefactoringGeneratorAgent`: asks the LLM to produce refactored Java code following the plan.
+   - `CompilerAgent`: compiles the Maven project and asks the LLM to summarize compilation errors when compilation fails.
+   - `TestAgent`: runs Maven tests, summarizes failing tests per-test, and can combine all failures into a single LLM-produced summary.
+- Summaries from compiler/test failures are appended in-memory to `refactoring_generator.llm.message_history` so the `refactoring_generator` includes them as context in subsequent calls.
 
-Inside the folder `data/repositories`, you will find a list of all the repositories and their corresponding tags used in our experiments. These are ready to be passed into the `setup_and_build.sh` script.
+## Useful scripts
 
-## Documentation
+- `run_refAgent.sh <org/repo> <tag>` — clones the repo tag, copies to `projects/after/`, builds, and runs the Python pipeline. The script resolves its own directory so it reliably finds `refAgent/RefAgent_main.py`.
 
-More documentation will be added soon to explain the internal logic of each agent and the LLM prompt strategies.
+## Troubleshooting
+
+- Can't find `RefAgent_main.py` from the shell script:
+   - Ensure the script is executable (`chmod +x run_refAgent.sh`). The script now computes its own directory and runs the Python file by absolute path.
+- Maven build issues:
+   - Check Java version compatibility with the target project. Prefer using the project's `mvnw` wrapper where available.
+   - Reminder: because `CompilerAgent` and `TestAgent` only invoke the build/test tools, they cannot
+      recover from an incompatible JDK or Maven version. If you see cryptic compile errors, first verify
+      you are using the correct Java and Maven versions that are known to build the project locally.
+      The `.sh` script performs a basic check, but you should double-check manually with `java -version`
+      and `mvn -v` (or `./mvnw -v`).
+- LLM failures or rate limits:
+   - Verify `.env` API keys and quotas.
+
+## Development notes & suggestions
+
+- Message history and context:
+   - The current design keeps summaries in-memory per-agent (`OpenaiLLM.message_history`). If you want summaries available to multiple agents, either append the summary to each agent's history or use a shared LLM wrapper instance.
+   - If you want summaries to persist across runs, save them into `results/<project>/` and reload them when the pipeline starts.
+
 
 ## License
 
-This project is licensed under the **MIT License**.
+MIT
