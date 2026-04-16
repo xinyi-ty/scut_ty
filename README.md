@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Multi-agent LLM-based Framework for Automatic Software Refactoring
 
 ## Overview
@@ -142,3 +143,7 @@ Note: the repository currently includes `requirment.txt` (typo preserved). Renam
 ## License
 
 MIT
+=======
+# scut_ty
+目前用于SRP及学习
+>>>>>>> e993164645a23d6e186ee60d6de03c2e44dfa404
